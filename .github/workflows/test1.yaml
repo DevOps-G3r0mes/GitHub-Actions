@@ -36,7 +36,7 @@ jobs:
       && github.event.issue.pull_request # Ensure it's a PR comment
       && contains(github.event.comment.body, '/deploy-dev') # Check for the specific command
       && github.event.action == 'created'
-      && (github.actor == 'your-github-username' || github.actor == 'another-trusted-user') # IMPORTANT: Restrict to trusted users
+      && (github.actor == '@fgloyola' || github.actor == 'fgloyola') # IMPORTANT: Restrict to trusted users
     runs-on: ubuntu-latest
     permissions:
       contents: read # Only read content
