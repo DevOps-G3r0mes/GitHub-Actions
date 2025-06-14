@@ -1,0 +1,178 @@
+# This workflow demonstrates how to filter by comment content
+# and trigger different jobs or steps based on the comment,
+# with a focus on security for Dependabot PRs and other forks.
+
+name: Comment-Triggered Workflow (Secure)
+
+on:
+  # Trigger when a comment is created on an issue or pull request.
+  # This event is useful for manual triggers from trusted users.
+  issue_comment:
+    types: [created]
+
+  # Trigger when a pull request is opened, synchronized (new commits), or reopened.
+  # This event runs in the context of the base repository, which is crucial for security
+  # when dealing with PRs from forks (like Dependabot's).
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+# Define default permissions for the entire workflow.
+# It's a good practice to set this to `read` and then
+# grant specific `write` permissions to individual jobs that need them.
+permissions:
+  contents: read # Default to read-only access for repository contents
+  pull-requests: write # Allow writing to pull requests (e.g., adding comments, labels)
+  issues: write # Allow writing to issues (e.g., for issue_comment event)
+  # action: write # This permission is generally for managing GitHub Actions itself,
+                   # less common for typical workflows. Usually not needed unless
+                   # you're dynamically creating/modifying workflows.
+
+jobs:
+  # Job 1: Manual Deployment Trigger from a Trusted User Comment
+  # This job triggers a deployment to 'dev' only if a trusted user comments '/deploy-dev'
+  manual_deploy_dev:
+    if: |
+      github.event_name == 'issue_comment'
+      && github.event.issue.pull_request # Ensure it's a PR comment
+      && contains(github.event.comment.body, '/deploy-dev') # Check for the specific command
+      && github.event.action == 'created'
+      && (github.actor == 'your-github-username' || github.actor == 'another-trusted-user') # IMPORTANT: Restrict to trusted users
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Only read content
+      deployments: write # Allow creating deployments
+    steps:
+      - name: Checkout base branch code
+        # When triggering from issue_comment on a PR, the ref is the default branch.
+        # Ensure you are checking out the *base* branch if your deployment logic
+        # needs that context, or the specific PR's merge commit if that's what you're deploying.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.issue.pull_request.base.ref }} # Checkout the base branch
+
+      - name: Echo Dev Deployment
+        run: |
+          echo "Manual deployment to Development environment initiated by ${{ github.actor }}..."
+          # Add your actual deployment commands here
+          # e.g., deploy_script.sh --env dev
+
+      - name: Add comment to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Deployment to Development environment triggered successfully by manual command.'
+            })
+
+  # Job 2: Dependabot-specific actions (e.g., auto-merge after all checks pass)
+  # This job uses `pull_request_target` for enhanced security with Dependabot PRs.
+  dependabot_auto_merge:
+    # Trigger only for pull_request_target events created by dependabot[bot]
+    # And only when the PR is open and a specific comment is made, or all checks pass.
+    # For auto-merge, you'd typically have other conditions like "all checks passed"
+    # and "auto-merge label exists".
+    if: |
+      github.event_name == 'pull_request_target'
+      && github.actor == 'dependabot[bot]'
+      && github.event.pull_request.state == 'open'
+      # You could add a condition like `contains(github.event.comment.body, '/dependabot merge')`
+      # if you want to manually approve Dependabot merges via comment.
+      # For automatic merging, you'd typically rely on branch protection rules
+      # and the PR status checks passing, which can be done by a separate job
+      # or a dedicated auto-merge action.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed for merging
+      pull-requests: write # Needed for interacting with PRs
+    steps:
+      - name: Checkout base branch (securely for pull_request_target)
+        # It is CRITICAL for pull_request_target not to check out the untrusted PR head
+        # without explicit safety checks. If you need the *merged* code, check out the base ref.
+        # For auto-merging, you typically don't need to check out the code here,
+        # as the merge is an API operation.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }} # Checkout the target branch
+
+      - name: Get Dependabot metadata (Optional, useful for more complex logic)
+        # This action is safe to use with pull_request_target as it doesn't execute
+        # code from the forked branch.
+        uses: dependabot/fetch-metadata@v2
+        id: metadata
+
+      - name: Enable auto-merge for Dependabot PR
+        # This step assumes your branch protection rules allow auto-merge.
+        # It's an example of an action you might perform for Dependabot.
+        # A more common approach is to use `gh pr merge --auto`
+        # or rely on branch protection rules to enable auto-merge.
+        run: |
+          echo "Attempting to enable auto-merge for Dependabot PR #${{ github.event.pull_request.number }}"
+          gh pr merge --auto --squash ${{ github.event.pull_request.number }} || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # The GITHUB_TOKEN has write access with pull_request_target
+
+      - name: Add success comment for Dependabot auto-merge
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🤖 Dependabot PR is being set for auto-merge once all checks pass.'
+            })
+
+  # Job 3: Trigger a specific step within a job based on a trusted user comment
+  # This demonstrates a conditional step in a job, applicable to PRs from forks.
+  run_specific_tests_on_pr:
+    # Trigger on `pull_request_target` because we're dealing with a PR,
+    # and we want to ensure the security context of the base repo.
+    if: |
+      github.event_name == 'issue_comment'
+      && github.event.issue.pull_request
+      && contains(github.event.comment.body, '/run-full-pr-tests')
+      && github.event.action == 'created'
+      && github.actor == 'your-github-username' # Restrict to trusted users
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Only read content
+      pull-requests: write # To comment on the PR
+    steps:
+      - name: Checkout PR head (safely)
+        # When using `pull_request_target` from a *forked* PR,
+        # `actions/checkout` will by default checkout the base branch.
+        # To checkout the PR's head, you need to explicitly tell it,
+        # but this is **INHERENTLY RISKY** as it executes untrusted code.
+        # Only do this if you have *extreme* confidence in your security setup
+        # or if the workflow is designed to *only* run after manual approval.
+        # For most cases, you would run tests on the *merge commit* or the *base* branch.
+        # For a truly safe test of the PR's changes, you might need a separate job
+        # triggered by `pull_request` (not `_target`) that has read-only permissions
+        # and doesn't access secrets.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }} # Checkout the PR's head - USE WITH EXTREME CAUTION!
+          fetch-depth: 0 # Fetch all history for proper git operations if needed
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run comprehensive test suite
+        run: |
+          echo "Running all tests on PR branch for #${{ github.event.issue.pull_request.number }}..."
+          npm test -- --all
+
+      - name: Post test results to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Full PR tests completed. Check workflow run for details.'
+            })
+
